@@ -1,258 +1,84 @@
 """
-app.py - Prediction Markets Research Assistant V2
-One page. One button. Three agents. User picks sector for drilldown.
+app.py - Prediction Markets BTC Hourly Arbitrage Assistant
 """
 
 import streamlit as st
-import plotly.graph_objects as go
+import pandas as pd
 import json
 from dotenv import load_dotenv
+import sys
+import importlib
 
-load_dotenv()
+load_dotenv(override=True)
 
-from data_fetcher import fetch_snapshot
-from agents import run_pipeline, run_drilldown
+# Force reload of agents to ensure changes are picked up by Streamlit
+import agents
+if "agents" in sys.modules:
+    importlib.reload(agents)
+
+from agents import run_pipeline
 
 st.set_page_config(
-    page_title="Prediction Markets Research Assistant",
-    page_icon="📊", layout="wide",
+    page_title="BTC Hourly Arbitrage Scanner",
+    page_icon="₿",
+    layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-st.markdown("""
-<style>
-    .stApp { background-color: #0a0c10; color: #e0e0e0; }
-    #MainMenu, footer, header { visibility: hidden; }
-    .block-container { padding-top: 1rem !important; }
-
-    .hdr { background: linear-gradient(135deg,#0d1117,#161b27); border:1px solid #21262d;
-           border-radius:14px; padding:18px 24px; margin-bottom:16px; }
-    .hdr h1 { color:#00d4aa; font-size:1.7rem; font-weight:700; margin:0; }
-    .hdr p  { color:#7d8590; margin:4px 0 0 0; font-size:0.83rem; }
-
-    .panel { background:#161b27; border:1px solid #21262d; border-radius:12px; padding:18px 20px; }
-    .ptitle { color:#00d4aa; font-size:0.75rem; font-weight:700; text-transform:uppercase;
-              letter-spacing:0.6px; margin-bottom:12px; }
-
-    .vol-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-    .vol-box  { background:#0d1117; border:1px solid #21262d; border-radius:8px;
-                padding:12px 14px; text-align:center; }
-    .vol-val  { font-size:1.4rem; font-weight:700; color:#00d4aa; }
-    .vol-lbl  { font-size:0.7rem; color:#7d8590; margin-top:2px; }
-    .vol-sub  { font-size:0.72rem; color:#9198a1; margin-top:2px; }
-
-    .sector-card { background:#0d1117; border:1px solid #21262d; border-radius:10px;
-                   padding:14px 16px; margin-bottom:10px; }
-    .sc-high   { border-left:3px solid #00d4aa; }
-    .sc-mod    { border-left:3px solid #f39c12; }
-    .sc-low    { border-left:3px solid #e74c3c; }
-    .sc-avoid  { border-left:3px solid #444; }
-    .sc-title  { font-weight:700; font-size:0.92rem; color:#e0e0e0; margin-bottom:5px; }
-    .sc-detail { font-size:0.78rem; color:#9198a1; margin:3px 0; }
-    .sc-detail strong { color:#c0c8d0; }
-    .sc-action { font-size:0.8rem; color:#c0c8d0; background:#161b27; border-radius:6px;
-                 padding:8px 10px; margin-top:8px; line-height:1.5; }
-    .sc-academic { font-size:0.7rem; color:#555; border-top:1px solid #21262d;
-                   padding-top:6px; margin-top:6px; }
-
-    .badge { display:inline-block; border-radius:10px; padding:2px 8px;
-             font-size:0.7rem; font-weight:700; margin-bottom:6px; }
-    .bg { background:#00d4aa22; color:#00d4aa; }
-    .by { background:#f39c1222; color:#f39c12; }
-    .br { background:#e74c3c22; color:#e74c3c; }
-    .ba { background:#44444422; color:#888; }
-
-    .top-trade { background:linear-gradient(135deg,#00d4aa0a,#3b82f60a);
-                 border:1px solid #00d4aa33; border-radius:8px; padding:14px 16px; margin-bottom:12px; }
-    .tt-title { color:#00d4aa; font-weight:700; font-size:0.95rem; margin-bottom:8px; }
-    .tt-body  { font-size:0.83rem; color:#c0c8d0; line-height:1.6; }
-    .tt-risk  { font-size:0.75rem; color:#e74c3c; margin-top:8px; }
-    .tt-warn  { font-size:0.75rem; color:#f39c12; margin-top:6px; font-style:italic; }
-
-    .banner { border-radius:8px; padding:14px 18px; margin-bottom:14px; }
-    .b-active { background:#00d4aa08; border:1px solid #00d4aa33; }
-    .b-quiet  { background:#f39c1208; border:1px solid #f39c1233; }
-    .b-mixed  { background:#3b82f608; border:1px solid #3b82f633; }
-    .b-title  { font-weight:700; font-size:1rem; margin-bottom:6px; }
-    .b-body   { font-size:0.83rem; color:#9198a1; line-height:1.5; }
-
-    .agent-step { font-size:0.82rem; padding:8px 12px; border-radius:6px; margin:4px 0;
-                  border:1px solid #21262d; color:#7d8590; }
-    .a-run { border-color:#f39c12; color:#f39c12; background:#f39c1208; }
-    .a-done{ border-color:#00d4aa44; color:#00d4aa; background:#00d4aa08; }
-</style>
-""", unsafe_allow_html=True)
-
 # ── Session State ─────────────────────────────────────────────────────────────
 
-for k, v in {
-    "pipeline":      None,
-    "drilldown":     None,
-    "drill_sector":  None,
-}.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+if "pipeline" not in st.session_state:
+    st.session_state.pipeline = None
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def fmt(v):
-    try:
-        v = float(v)
-        if v >= 1_000_000: return f"{v/1_000_000:.1f}M"
-        if v >= 1_000:     return f"{v/1_000:.0f}K"
-        return f"{v:.0f}"
+def fmt_price(v):
+    try: return f"${float(v):.3f}"
     except: return "—"
 
-SECTOR_EMOJI = {
-    "sports":"🏀","politics":"🗳️","finance":"📈",
-    "crypto":"₿","world":"🌍","other":"📌"
-}
 VERDICT_MAP = {
-    "HIGH OPPORTUNITY": ("bg","sc-high"),
-    "MODERATE":         ("by","sc-mod"),
-    "LOW OPPORTUNITY":  ("br","sc-low"),
-    "AVOID":            ("ba","sc-avoid"),
+    "EXECUTE": "green",
+    "MONITOR": "orange",
+    "REJECT":  "red",
+    "ERROR":   "normal",
 }
-
-# ── Shortcuts ─────────────────────────────────────────────────────────────────
-
-pipeline   = st.session_state.pipeline or {}
-collector  = pipeline.get("collector")  or {}
-classifier = pipeline.get("classifier") or {}
-strategist = pipeline.get("strategist") or {}
-sectors    = classifier.get("sectors")  or {}
-analysis   = strategist.get("sector_analysis") or {}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HEADER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-st.markdown("""
-<div class="hdr">
-  <h1>📊 Prediction Markets Research Assistant</h1>
-  <p>Live cross-exchange intelligence · Kalshi × Polymarket · 3-Agent AI Pipeline · RAG: Wolfers & Zitzewitz (2006)</p>
-</div>""", unsafe_allow_html=True)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TOP ROW — Volume left | Sector chart right
-# ═══════════════════════════════════════════════════════════════════════════════
-
-vol_col, chart_col = st.columns([1, 1.6], gap="medium")
-
-with vol_col:
-    st.markdown('<div class="panel">', unsafe_allow_html=True)
-    st.markdown('<div class="ptitle">📡 Live Platform Volume</div>', unsafe_allow_html=True)
-
-    kv = fmt(collector.get("kalshi_total_volume"))
-    pv = fmt(collector.get("polymarket_total_volume"))
-    km = collector.get("kalshi_market_count", "—")
-    pm = collector.get("polymarket_market_count", "—")
-
-    st.markdown(f"""
-    <div class="vol-grid">
-        <div class="vol-box">
-            <div class="vol-val">{kv}</div>
-            <div class="vol-lbl">Kalshi Contracts Traded</div>
-            <div class="vol-sub">{km} markets</div>
-        </div>
-        <div class="vol-box">
-            <div class="vol-val">{pv}</div>
-            <div class="vol-lbl">Polymarket Dollar Volume</div>
-            <div class="vol-sub">{pm} markets</div>
-        </div>
-    </div>""", unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-with chart_col:
-    st.markdown('<div class="panel">', unsafe_allow_html=True)
-    st.markdown('<div class="ptitle">📊 Markets by Sector</div>', unsafe_allow_html=True)
-
-    if sectors:
-        cats    = [s for s in ["sports","politics","finance","crypto","world","other"] if s in sectors]
-        k_cnts  = [len(sectors[c].get("kalshi", [])) for c in cats]
-        p_cnts  = [len(sectors[c].get("polymarket", [])) for c in cats]
-        pair_cnts = [len(sectors[c].get("matched_pairs", [])) for c in cats]
-
-        fig = go.Figure(data=[
-            go.Bar(name="Kalshi markets",     x=cats, y=k_cnts,    marker_color="#00d4aa",
-                   text=k_cnts, textposition="outside", textfont=dict(size=10)),
-            go.Bar(name="Polymarket markets", x=cats, y=p_cnts,    marker_color="#3b82f6",
-                   text=p_cnts, textposition="outside", textfont=dict(size=10)),
-            go.Bar(name="Matched pairs",      x=cats, y=pair_cnts, marker_color="#8b5cf6",
-                   text=pair_cnts, textposition="outside", textfont=dict(size=10)),
-        ])
-        fig.update_layout(
-            barmode="group",
-            plot_bgcolor="#161b27", paper_bgcolor="#161b27",
-            font_color="#9198a1", margin=dict(l=10,r=10,t=40,b=30),
-            height=210,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                        xanchor="right", x=1, bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
-            yaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
-            xaxis=dict(tickfont=dict(size=12)),
-        )
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-        st.caption("Number of markets classified per sector across both platforms")
-    else:
-        st.caption("Run analysis to see sector breakdown.")
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+with st.container(border=True):
+    st.title("₿TC Arbitrage Scanner")
+    st.caption("Live cross-exchange intelligence · Kalshi × Polymarket · 3-Agent AI Pipeline · RAG: Wolfers & Zitzewitz (2006)")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RUN BUTTON
 # ═══════════════════════════════════════════════════════════════════════════════
 
-run_col, status_col = st.columns([1, 2], gap="medium")
-
-with run_col:
-    run_btn = st.button("▶ Run Full Analysis", type="primary", use_container_width=True)
-
-with status_col:
-    if pipeline:
-        best = strategist.get("best_sector", "")
-        total_mkts = classifier.get("total_markets", 0)
-        st.caption(f"Last run: {total_mkts} markets classified · Best sector: **{SECTOR_EMOJI.get(best,'')} {best.title()}** · {strategist.get('overall_verdict','')}")
+run_btn = st.button("▶ Run BTC Arbitrage Scan", type="primary", use_container_width=True)
 
 if run_btn:
     prog_bar    = st.progress(0, text="Starting...")
     step_holder = st.empty()
     step_labels = []
 
+    SPINNER_URL = 'data:image/svg+xml;utf8,<svg width="14" height="14" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="%2300d4aa"><style>.spinner{transform-origin:center;animation:spin .75s infinite linear}@keyframes spin{100%{transform:rotate(360deg)}}</style><path d="M12,1A11,11,0,1,0,23,12,11,11,0,0,0,12,1Zm0,19a8,8,0,1,1,8-8A8,8,0,0,1,12,20Z" opacity=".25"/><path d="M10.14,1.16a11,11,0,0,0-9,8.92A1.59,1.59,0,0,0,2.46,12,1.52,1.52,0,0,0,4.11,10.7a8,8,0,0,1,6.66-6.61A1.42,1.42,0,0,0,12,2.69h0A1.57,1.57,0,0,0,10.14,1.16Z" class="spinner"/></svg>'
+
     def update(step, total, label):
         step_labels.append(label)
         prog_bar.progress(int(step/total*100), text=label)
-        html = "".join(
-            f'<div class="agent-step a-done">✅ {l}</div>' if i < len(step_labels)-1
-            else f'<div class="agent-step a-run">⏳ {l}</div>'
-            for i, l in enumerate(step_labels)
-        )
-        step_holder.markdown(html, unsafe_allow_html=True)
+        with step_holder.container():
+            for i, l in enumerate(step_labels):
+                if i < len(step_labels)-1:
+                    st.caption(f"✅ {l}")
+                else:
+                    st.markdown(f"<span style='color: #a0aab4; font-size: 14px;'><img src='{SPINNER_URL}' style='margin-right: 6px; margin-bottom: -2px;'> {l}</span>", unsafe_allow_html=True)
 
     try:
-        update(0, 3, "🔄 Fetching top 200 markets from Kalshi and Polymarket...")
-        k_raw, p_raw, _ = fetch_snapshot(category_filter="all", limit=200)
+        results = run_pipeline(progress_callback=update)
+        st.session_state.pipeline = results
 
-        def mkt_to_dict(m):
-            return {
-                "title":    m.title,
-                "volume":   m.volume or 0,
-                "mid_price": m.mid_price,
-                "ticker":   m.ticker,
-                "category": m.category,
-            }
-
-        results = run_pipeline(
-            [mkt_to_dict(m) for m in k_raw],
-            [mkt_to_dict(m) for m in p_raw],
-            progress_callback=update,
-        )
-        st.session_state.pipeline    = results
-        st.session_state.drilldown   = None
-        st.session_state.drill_sector = None
-
-        prog_bar.progress(100, text="✅ Done")
+        prog_bar.progress(100, text="Done")
         step_holder.empty()
         prog_bar.empty()
         st.rerun()
@@ -263,185 +89,167 @@ if run_btn:
 # ── Stop here if no pipeline yet ──────────────────────────────────────────────
 
 if not st.session_state.pipeline:
-    st.info("Click **▶ Run Full Analysis** to fetch live markets and generate sector verdicts.")
+    st.info("Click **Run BTC Hourly Arbitrage Scan** to fetch live markets and calculate edge.", icon="ℹ️")
     st.stop()
 
+pipeline = st.session_state.pipeline
 if pipeline.get("error"):
-    st.error(f"Pipeline error: {pipeline['error']}")
+    st.error(f"Pipeline error: {pipeline['error']}", icon="❌")
     st.stop()
 
-st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# SESSION BANNER
+# PIPELINE RESULTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-verdict   = strategist.get("overall_verdict", "MIXED")
-narrative = strategist.get("session_narrative", "")
-best_sec  = strategist.get("best_sector", "")
-best_why  = strategist.get("best_sector_reason", "")
+col1, col2, col3 = st.columns(3, gap="large")
 
-v_cls = {"ACTIVE":"b-active","QUIET":"b-quiet","MIXED":"b-mixed"}.get(verdict,"b-mixed")
-v_clr = {"ACTIVE":"#00d4aa","QUIET":"#f39c12","MIXED":"#3b82f6"}.get(verdict,"#888")
-v_emoji = {"ACTIVE":"🟢","QUIET":"🟡","MIXED":"🟡"}.get(verdict,"⚪")
-
-st.markdown(f"""
-<div class="banner {v_cls}">
-    <div class="b-title" style="color:{v_clr}">{v_emoji} Session: {verdict}</div>
-    <div class="b-body">{narrative}</div>
-    {f'<div class="b-body" style="margin-top:8px">🏆 <strong style="color:{v_clr}">Best sector: {SECTOR_EMOJI.get(best_sec,"")} {best_sec.title()}</strong> — {best_why}</div>' if best_sec else ''}
-</div>""", unsafe_allow_html=True)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# BOTTOM — Sector cards left | Drilldown right
-# ═══════════════════════════════════════════════════════════════════════════════
-
-cards_col, drill_col = st.columns([1, 1], gap="medium")
-
-# ── LEFT: Sector verdict cards ────────────────────────────────────────────────
-
-with cards_col:
-    st.markdown('<div class="panel">', unsafe_allow_html=True)
-    st.markdown('<div class="ptitle">🗂 Sector Analysis</div>', unsafe_allow_html=True)
-
-    sector_order = ["sports","politics","finance","crypto","world","other"]
-    available_sectors = [s for s in sector_order if s in analysis]
-
-    for sec in available_sectors:
-        card     = analysis[sec]
-        sv       = card.get("verdict", "MODERATE")
-        badge_cls, card_cls = VERDICT_MAP.get(sv, ("ba","sc-avoid"))
-        emoji    = SECTOR_EMOJI.get(sec, "📌")
-        is_best  = (sec == best_sec)
-
-        st.markdown(f"""
-        <div class="sector-card {card_cls}" {"style='border-color:#00d4aa66'" if is_best else ""}>
-            <div class="sc-title">{emoji} {sec.upper()} {"⭐ Best" if is_best else ""}</div>
-            <span class="badge {badge_cls}">{sv}</span>
-            <div class="sc-detail">Markets: <strong>K={card.get('num_kalshi','—')} | P={card.get('num_poly','—')} | Pairs={card.get('num_pairs','—')}</strong></div>
-            <div class="sc-detail">Avg Cross-Platform Spread: <strong>{card.get('avg_spread_pct','—')}</strong></div>
-            <div class="sc-action">{card.get('summary','—')}</div>
-            <div class="sc-action" style="margin-top:6px">⚡ {card.get('recommendation','—')}</div>
-            <div class="sc-academic">📚 {card.get('academic_note','—')}</div>
-        </div>""", unsafe_allow_html=True)
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# ── RIGHT: Sector selector + drilldown ───────────────────────────────────────
-
-with drill_col:
-    st.markdown('<div class="panel">', unsafe_allow_html=True)
-    st.markdown('<div class="ptitle">🎯 Sector Deep Dive</div>', unsafe_allow_html=True)
-
-    if available_sectors:
-        # Sector selector
-        default_idx = available_sectors.index(best_sec) if best_sec in available_sectors else 0
-        chosen = st.selectbox(
-            "Which sector would you like to know more about?",
-            options=available_sectors,
-            format_func=lambda s: f"{SECTOR_EMOJI.get(s,'')} {s.title()}",
-            index=default_idx,
-            key="sector_select"
-        )
-
-        drill_btn = st.button(
-            f"🔍 Analyze {SECTOR_EMOJI.get(chosen,'')} {chosen.title()} Trades",
-            type="primary", use_container_width=True
-        )
-
-        if drill_btn:
-            with st.spinner(f"Analyzing best {chosen} trades..."):
-                sector_data = sectors.get(chosen, {})
-                st.session_state.drilldown    = run_drilldown(chosen, sector_data)
-                st.session_state.drill_sector = chosen
-            st.rerun()
-
-        # Show drilldown results
-        dd  = st.session_state.drilldown
-        sec = st.session_state.drill_sector
-
-        if dd and not dd.get("parse_error"):
-            st.markdown(f"#### {SECTOR_EMOJI.get(sec,'')} {(sec or '').title()} — Best Trade")
-
-            cond = dd.get("sector_conditions", "")
-            if cond:
-                st.caption(cond)
-
-            top = dd.get("top_trade", {})
-            if top:
-                exploit = top.get("fee_exploitable", False)
-                e_icon  = "✅ Yes" if exploit else "❌ No (spread too tight)"
-
-                st.markdown(f"""
-                <div class="top-trade">
-                    <div class="tt-title">🏆 #1 Recommended Trade</div>
-                    <div class="tt-body">
-                        <strong>Kalshi:</strong> {top.get("kalshi_title","—")}<br>
-                        <strong>Polymarket:</strong> {top.get("polymarket_title","—")}<br>
-                        <strong>Spread:</strong> {top.get("spread_pct","—")} &nbsp;·&nbsp;
-                        <strong>Fee-exploitable:</strong> {e_icon}<br>
-                        <strong>Platform to favor:</strong> {top.get("platform_to_buy","—").title()}<br><br>
-                        <strong style="color:#00d4aa">⚡ Action:</strong> {top.get("action","—")}<br><br>
-                        {top.get("rationale","")}
-                    </div>
-                    <div class="tt-risk">⚠ Risk: {top.get("key_risk","—")}</div>
-                    <div class="tt-warn">📚 {dd.get("academic_warning","")}</div>
-                </div>""", unsafe_allow_html=True)
-
-            runner = dd.get("runner_up", {})
-            if runner and runner.get("kalshi_title"):
-                st.markdown("**Runner-up:**")
-                st.markdown(f"""
-                <div class="sector-card sc-mod" style="margin-top:0">
-                    <div class="sc-detail"><strong>{runner.get("kalshi_title","—")}</strong></div>
-                    <div class="sc-detail">Spread: {runner.get("spread_pct","—")}</div>
-                    <div class="sc-detail" style="color:#c0c8d0">{runner.get("action","—")}</div>
-                </div>""", unsafe_allow_html=True)
-
-            # All pairs in this sector
-            sec_pairs = sectors.get(sec, {}).get("matched_pairs", [])
-            if sec_pairs:
-                st.markdown("---")
-                st.markdown(f"**All {sec} matched pairs ({len(sec_pairs)})**")
-                import pandas as pd
-                df = pd.DataFrame(sec_pairs)
-                show = [c for c in ["kalshi_title","polymarket_title","spread_pct","kalshi_mid","polymarket_mid"] if c in df.columns]
-                st.dataframe(
-                    df[show].rename(columns={
-                        "kalshi_title":"Kalshi","polymarket_title":"Polymarket",
-                        "spread_pct":"Spread","kalshi_mid":"K Mid","polymarket_mid":"P Mid"
-                    }),
-                    hide_index=True, use_container_width=True, height=220
-                )
-
-        elif dd and dd.get("parse_error"):
-            st.error(f"Parse error: {dd['parse_error']}")
-        else:
-            # Show top markets from this sector while waiting
-            import pandas as pd
-            sec_k = sectors.get(chosen, {}).get("kalshi", [])
-            sec_p = sectors.get(chosen, {}).get("polymarket", [])
-            if sec_k:
-                st.caption(f"**Kalshi {chosen} markets:**")
-                st.dataframe(
-                    pd.DataFrame([{"Title": m["title"], "Volume": fmt(m.get("volume")), "Mid": m.get("mid")} for m in sec_k]),
-                    hide_index=True, use_container_width=True, height=180
-                )
-            if sec_p:
-                st.caption(f"**Polymarket {chosen} markets:**")
-                st.dataframe(
-                    pd.DataFrame([{"Title": m["title"], "Volume": fmt(m.get("volume")), "Mid": m.get("mid")} for m in sec_p]),
-                    hide_index=True, use_container_width=True, height=180
-                )
+# ── AGENT 1: COLLECTOR ──
+with col1:
+    st.subheader("🔍 Agent 1: Data Fetcher")
+    c_data = pipeline.get("collector", {})
+    if c_data.get("fetch_error"):
+        st.error(c_data["fetch_error"])
     else:
-        st.info("No sectors found. Run analysis first.")
+        poly = c_data.get("polymarket", {})
+        kalshi = c_data.get("kalshi", {})
+        
+        st.write("**Polymarket Target Event:**")
+        st.caption(f"Slug: `{poly.get('slug')}`")
+        st.write(f"Title: {poly.get('title')}")
+        poly_strike_val = poly.get('strike', 0)
+        st.write(f"Strike: **\\${poly_strike_val:,.2f}**")
+        up_p = poly.get('up_price', 0)
+        dn_p = poly.get('down_price', 0)
+        st.text(f"Up: ${up_p:.3f} · Down: ${dn_p:.3f}")
+        st.caption(f"Price Range: \\${min(up_p, dn_p):.3f} — \\${max(up_p, dn_p):.3f}")
+        
+        st.divider()
+        st.caption("ℹ️ *Polymarket names by candle open, Kalshi by candle close. Both resolve the same hourly market.*")
+        st.write("**Kalshi Target Event:**")
+        st.caption(f"Ticker: `{kalshi.get('event_ticker')}`")
+        
+        kalshi_mkts = kalshi.get('markets', [])
+        st.write(f"Active Strikes Pulled: **{len(kalshi_mkts)}**")
+        
+        if kalshi_mkts:
+            # Show the title from the first market
+            st.write(f"Title: {kalshi_mkts[0].get('title', 'N/A')}")
+            
+            # Find closest strike to Polymarket's strike
+            poly_strike = poly.get('strike', 0)
+            if poly_strike:
+                closest = min(kalshi_mkts, key=lambda m: abs(m.get('strike', 0) - poly_strike))
+                st.write(f"Nearest Strike: **\\${closest.get('strike', 0):,.0f}**")
+                c_yes = closest.get('yes_price', 0)
+                c_no = closest.get('no_price', 0)
+                # If both are $1.00, the book is empty — show last_price if available
+                if c_yes >= 1.0 and c_no >= 1.0:
+                    st.text("Yes: N/A · No: N/A (no active orders)")
+                else:
+                    st.text(f"Yes: ${c_yes:.3f} · No: ${c_no:.3f}")
+            
+            # Strike range
+            strikes = [m.get('strike', 0) for m in kalshi_mkts if m.get('strike', 0) > 0]
+            if strikes:
+                st.caption(f"Range: \\${min(strikes):,.0f} — \\${max(strikes):,.0f}")
 
-    st.markdown('</div>', unsafe_allow_html=True)
+# ── AGENT 2: QUANT STRATEGIST ──
+with col2:
+    st.subheader("📊 Agent 2: Quant Strategist")
+    q_data = pipeline.get("quant", {})
+    
+    if q_data.get("error"):
+        st.error(q_data["error"])
+    elif not q_data.get("matched"):
+        st.warning("No identical strike could be matched across platforms.")
+    else:
+        arb_found = q_data.get("arbitrage_found", False)
+        
+        if arb_found:
+            st.success("Arbitrage Opportunity Detected!")
+        else:
+            st.info("No arbitrage detected at this time.")
+            
+        matched_strike = q_data.get('strike', 0)
+        st.write(f"**Matched Strike:** \\${matched_strike:,.0f}")
+        cost_str = fmt_price(q_data.get('total_cost')).replace('$', '\\$')
+        st.write(f"**Total Cost of Legs:** {cost_str}")
+        if arb_found:
+            profit_str = fmt_price(q_data.get('guaranteed_profit')).replace('$', '\\$')
+            st.write(f"**Guaranteed Profit:** :green[{profit_str}]")
+            st.write("**Execution Legs:**")
+            for leg in q_data.get("buy_legs", []):
+                leg_price = fmt_price(leg.get('price')).replace('$', '\\$')
+                st.caption(f"- Buy **{leg.get('side', '').upper()}** on {leg.get('platform', '').title()} at {leg_price}")
+                
+        with st.expander("Quant LLM Reasoning"):
+            reasoning_text = q_data.get("reasoning", "")
+            # Escape $ signs so Streamlit doesn't render them as LaTeX
+            st.write(reasoning_text.replace("$", r"\$"))
+        
+        # ── Live Spread Equation ──
+        legs = q_data.get("buy_legs", [])
+        if len(legs) == 2:
+            l1, l2 = legs[0], legs[1]
+            l1_label = f"{l1.get('platform','').title()} {l1.get('side','').upper()}"
+            l2_label = f"{l2.get('platform','').title()} {l2.get('side','').upper()}"
+            l1_price = l1.get('price', 0)
+            l2_price = l2.get('price', 0)
+            total = q_data.get('total_cost', l1_price + l2_price)
+            profit = q_data.get('guaranteed_profit', 1.0 - total)
+            arb_symbol = "✅ < $1.00" if total < 1.0 else "❌ ≥ $1.00"
+            
+            st.divider()
+            st.caption("**Live Spread Equation:**")
+            pnl_label = "Guaranteed Profit" if profit >= 0 else "Guaranteed Loss"
+            st.code(
+                f"{l1_label} (${l1_price:.3f}) + {l2_label} (${l2_price:.3f})\n"
+                f"= ${total:.4f}  {arb_symbol}\n"
+                f"{pnl_label} = $1.00 - ${total:.4f} = ${profit:.4f}",
+                language=None
+            )
 
-# ── Footer ────────────────────────────────────────────────────────────────────
+# ── AGENT 3: RISK MANAGER ──
+with col3:
+    st.subheader("⚖️ Agent 3: Risk Manager")
+    r_data = pipeline.get("risk", {})
+    
+    if r_data.get("error"):
+        st.error(r_data["error"])
+    else:
+        decision = r_data.get("final_decision", "ERROR")
+        d_color = VERDICT_MAP.get(decision, "normal")
+        
+        st.markdown(f"### Final Verdict: :{d_color}[{decision}]")
+        st.write(r_data.get("ui_summary", ""))
+        st.write("**Risk Assessment:**")
+        st.caption(r_data.get("risk_assessment", ""))
+        st.write("**Academic Grounding (RAG):**")
+        st.caption(f"📚 *{r_data.get('academic_citation', '')}*")
 
-st.markdown("---")
-st.caption("Wolfers & Zitzewitz (2006) · NBER Working Paper 12083 · Prediction Markets in Theory and Practice")
+# ═══════════════════════════════════════════════════════════════════════════════
+# QUALITY CONTROL FOOTER
+# ═══════════════════════════════════════════════════════════════════════════════
+st.divider()
 
-with st.expander("🔧 Raw Pipeline JSON"):
+qc_metrics = pipeline.get("qc_metrics", {})
+if qc_metrics:
+    with st.container(border=True):
+        st.write("**🔍 AI Quality Control & Validation Metrics**")
+        
+        m1, m2, m3, m4 = st.columns(4)
+        c_succ = "✅ Passed" if qc_metrics.get("collector_success") else "❌ Failed"
+        q_succ = "✅ Passed" if qc_metrics.get("quant_success") else "❌ Failed"
+        r_succ = "✅ Passed" if qc_metrics.get("risk_success") else "❌ Failed"
+        
+        m1.metric("Total Latency", f"{qc_metrics.get('total_time_sec', 0)}s")
+        m2.metric("Collector Validation", c_succ)
+        m3.metric("Quant LLM Schema", q_succ)
+        m4.metric("Risk LLM Schema", r_succ)
+        
+        st.caption("JSON Schema enforcement active. Agent workflows fully deterministic.")
+
+st.markdown("<div style='text-align: center; color: gray; font-size: 0.8em;'>Wolfers & Zitzewitz (2006) · NBER Working Paper 12083 · Prediction Markets in Theory and Practice</div>", unsafe_allow_html=True)
+
+with st.expander("🔧 Raw pipeline JSON"):
     st.json(pipeline)

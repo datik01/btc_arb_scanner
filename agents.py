@@ -1,29 +1,50 @@
 """
-agents.py - Clean 3-Agent Pipeline
-Agent 1: Collector  — top 200 by volume from each platform (titles + counts only)
-Agent 2: Classifier — sends titles to OpenAI, gets sector classification back
-Agent 3: Strategist — analyzes each sector using academic paper, recommends best sector
-Agent 3b: Drilldown — user picks sector, runs deep analysis on that sector
+agents.py - Agentic Pipeline for BTC Hourly Arbitrage
+Agent 1: Collector  — Fetches raw BTC hourly markets from Polymarket and Kalshi
+Agent 2: Quant Strategist — Uses LLM to identify the matching strike and calculate arbitrage spread
+Agent 3: Risk Manager — Reviews the strategy against RAG context and issues a final verdict
 """
 
 import os
 import json
+import time
 from openai import OpenAI
 from rag import retrieve
 
+# For tool calling requirement
+from data_fetcher import fetch_btc_hourly_markets
+
+# Always use OpenAI (required for tool calling in Agent 2)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 MODEL = "gpt-4o-mini"
 
-def _llm(system: str, user: str, temperature: float = 0.3) -> str:
-    resp = client.chat.completions.create(
-        model=MODEL,
-        temperature=temperature,
-        messages=[
+def _llm(system: str, user: str, temperature: float = 0.3, json_mode: bool = False, max_retries: int = 3) -> str:
+    import openai
+    kwargs = {
+        "model": MODEL,
+        "temperature": temperature,
+        "messages": [
             {"role": "system", "content": system},
             {"role": "user",   "content": user},
         ]
-    )
-    return resp.choices[0].message.content.strip()
+    }
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+        
+    for attempt in range(max_retries):
+        try:
+            resp = client.chat.completions.create(**kwargs)
+            return resp.choices[0].message.content.strip()
+        except openai.RateLimitError as e:
+            if attempt < max_retries - 1:
+                print(f"  [LLM] Rate limit hit. Retrying in 22s... (Attempt {attempt+1}/{max_retries})")
+                time.sleep(22)
+            else:
+                raise e
+        except Exception as e:
+            raise e
+            
+    return ""
 
 def _parse_json(raw: str):
     clean = raw.replace("```json", "").replace("```", "").strip()
@@ -32,388 +53,409 @@ def _parse_json(raw: str):
 
 # ══════════════════════════════════════════════════════════════════════════════
 # AGENT 1: COLLECTOR
-# Fetches top 200 by volume from each platform
-# Returns: titles, volume counts, basic stats — no dollar conversion
+# Calls the data fetcher tool to get raw BTC hourly data
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_collector(kalshi_markets: list, poly_markets: list) -> dict:
+def run_collector() -> dict:
     """
-    Agent 1: Collects top markets by volume from each platform.
-    Just counts and titles — no dollar math.
+    Agent 1: Uses a Tool Call to fetch exact BTC hourly market data.
     """
-    print("\n[Agent 1: Collector] Fetching top markets by volume...")
-
-    # Sort by volume descending
-    k_sorted = sorted(kalshi_markets, key=lambda m: float(m.get("volume") or 0), reverse=True)
-    p_sorted = sorted(poly_markets,   key=lambda m: float(m.get("volume") or 0), reverse=True)
-
-    # Total volume counts
-    k_total = sum(float(m.get("volume") or 0) for m in kalshi_markets)
-    p_total = sum(float(m.get("volume") or 0) for m in poly_markets)
-
-    # Top 20 from each with just what we need
-    top_k = [
-        {
-            "title":   m.get("title", ""),
-            "volume":  float(m.get("volume") or 0),
-            "mid":     m.get("mid_price"),
-            "ticker":  m.get("ticker", ""),
-        }
-        for m in k_sorted[:20] if m.get("title")
-    ]
-
-    top_p = [
-        {
-            "title":   m.get("title", ""),
-            "volume":  float(m.get("volume") or 0),
-            "mid":     m.get("mid_price"),
-            "ticker":  m.get("ticker", ""),
-        }
-        for m in p_sorted[:20] if m.get("title")
-    ]
-
+    print("\n[Agent 1: Collector] Calling fetch_btc_hourly_markets tool...")
+    t0 = time.time()
+    
+    # Tool Call Execution
+    poly_data, kalshi_data, error = fetch_btc_hourly_markets()
+    
+    t1 = time.time()
     result = {
-        "kalshi_total_volume":     round(k_total),
-        "polymarket_total_volume": round(p_total),
-        "kalshi_market_count":     len(kalshi_markets),
-        "polymarket_market_count": len(poly_markets),
-        "volume_leader":           "polymarket" if p_total > k_total else "kalshi",
-        "top_kalshi":              top_k,
-        "top_polymarket":          top_p,
+        "polymarket": poly_data,
+        "kalshi": kalshi_data,
+        "fetch_error": error,
+        "qc": {"time_sec": round(t1 - t0, 2), "success": error == ""}
     }
-
-    print(f"  ✅ Kalshi: {len(top_k)} top markets | Polymarket: {len(top_p)} top markets")
-    print(f"  Kalshi volume: {k_total:,.0f} contracts | Polymarket volume: {p_total:,.0f} USDC")
+    print(f"  ✅ Tool executed in {result['qc']['time_sec']}s")
     return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AGENT 2: CLASSIFIER
-# Sends all market titles to OpenAI → gets sector classification back
-# Sectors: sports | politics | finance | crypto | world | other
+# AGENT 2: QUANT STRATEGIST
+# LLM with Tool Calling — uses calculate_arbitrage tool for exact math
 # ══════════════════════════════════════════════════════════════════════════════
 
-CLASSIFIER_SYSTEM = """
-You are a prediction market classifier.
+QUANT_SYSTEM = """You are an expert Quantitative Arbitrage Strategist for cross-exchange prediction market trading.
 
-You will receive a list of market titles from Kalshi and Polymarket.
-Classify EACH market into exactly one of these sectors:
-- sports: any game, match, player, team, league (NBA, NFL, MLB, NHL, soccer, golf, tennis)
-- politics: elections, candidates, approval ratings, government, policy, congress, president
-- finance: Fed decisions, interest rates, CPI, GDP, inflation, recession, stocks, economic data
-- crypto: Bitcoin, Ethereum, any cryptocurrency price, DeFi, blockchain events
-- world: geopolitical events, wars, international news, climate, AI/technology milestones
-- other: anything that doesn't fit above
+You will receive market data from Polymarket and Kalshi for Bitcoin hourly contracts.
 
-Return ONLY valid JSON — no preamble, no markdown:
+Polymarket's market resolves relative to the 1-hour candle's OPENING price on Binance.
+Kalshi's markets have fixed absolute price strikes.
+
+You have access to a `calculate_arbitrage` tool that does exact arithmetic for you.
+Call this tool with the Polymarket and Kalshi data to get precise cost calculations.
+
+After receiving the tool result, provide your analysis as valid JSON:
 {
-  "classified": [
-    {"title": "exact title here", "platform": "kalshi", "sector": "sports", "volume": 0.0, "mid": 0.0},
-    ...
-  ]
+  "matched": true,
+  "strike": <kalshi_strike_from_tool>,
+  "polymarket_prices": {"up": <float>, "down": <float>},
+  "kalshi_prices": {"yes": <float>, "no": <float>},
+  "arbitrage_found": <bool from tool>,
+  "buy_legs": [
+     {"platform": "polymarket", "side": "<from tool>", "price": <float>},
+     {"platform": "kalshi", "side": "<from tool>", "price": <float>}
+  ],
+  "total_cost": <float from tool>,
+  "guaranteed_profit": <float from tool>,
+  "reasoning": "2-3 sentence explanation of WHY this pair is optimal and whether the spread persists."
 }
 
-Be decisive. Every market gets exactly one sector.
+CRITICAL: Use the EXACT numbers returned by the calculate_arbitrage tool. Do NOT recalculate.
 """
 
-def run_classifier(collector_output: dict) -> dict:
-    """
-    Agent 2: Sends all market titles to OpenAI for sector classification.
-    Simple, clean, one LLM call.
-    """
-    print("\n[Agent 2: Classifier] Classifying markets into sectors...")
-
-    top_k = collector_output.get("top_kalshi", [])
-    top_p = collector_output.get("top_polymarket", [])
-
-    # Build flat list of markets to classify
-    markets_to_classify = (
-        [{"title": m["title"], "platform": "kalshi",     "volume": m["volume"], "mid": m.get("mid")} for m in top_k] +
-        [{"title": m["title"], "platform": "polymarket", "volume": m["volume"], "mid": m.get("mid")} for m in top_p]
-    )
-
-    user_msg = f"""
-Classify each of these {len(markets_to_classify)} prediction market titles into their sector.
-
-Markets:
-{json.dumps(markets_to_classify, indent=2)}
-"""
-    raw = _llm(CLASSIFIER_SYSTEM, user_msg, temperature=0.1)
-
-    try:
-        result = _parse_json(raw)
-        classified = result.get("classified", [])
-
-        # Group by sector
-        sectors = {}
-        for m in classified:
-            sec = m.get("sector", "other")
-            if sec not in sectors:
-                sectors[sec] = {"kalshi": [], "polymarket": []}
-            platform = m.get("platform", "other")
-            if platform == "kalshi":
-                sectors[sec]["kalshi"].append(m)
-            else:
-                sectors[sec]["polymarket"].append(m)
-
-        # Find cross-platform matches (same event on both)
-        for sec, data in sectors.items():
-            k_titles = data["kalshi"]
-            p_titles = data["polymarket"]
-            matches = []
-            for km in k_titles:
-                for pm in p_titles:
-                    # Simple keyword overlap check
-                    k_words = set(km["title"].lower().split())
-                    p_words = set(pm["title"].lower().split())
-                    stopwords = {"will","the","a","an","in","of","to","be","vs","at","by","or","and","is","for","on"}
-                    k_clean = k_words - stopwords
-                    p_clean = p_words - stopwords
-                    if len(k_clean) > 0 and len(p_clean) > 0:
-                        overlap = len(k_clean & p_clean) / min(len(k_clean), len(p_clean))
-                        if overlap >= 0.3:
-                            k_mid = float(km.get("mid") or 0.5)
-                            p_mid = float(pm.get("mid") or 0.5)
-                            spread = abs(k_mid - p_mid)
-                            matches.append({
-                                "kalshi_title":     km["title"],
-                                "polymarket_title": pm["title"],
-                                "kalshi_mid":       round(k_mid, 3),
-                                "polymarket_mid":   round(p_mid, 3),
-                                "spread":           round(spread, 3),
-                                "spread_pct":       f"{spread*100:.1f}%",
-                                "kalshi_volume":    km.get("volume", 0),
-                                "polymarket_volume": pm.get("volume", 0),
-                            })
-            data["matched_pairs"] = matches
-
-        print(f"  ✅ Classified {len(classified)} markets into {len(sectors)} sectors")
-        for sec, data in sectors.items():
-            print(f"     {sec}: {len(data['kalshi'])} Kalshi | {len(data['polymarket'])} Poly | {len(data.get('matched_pairs',[]))} pairs")
-
-        return {
-            "sectors":        sectors,
-            "total_markets":  len(classified),
-            "all_classified": classified,
+# Tool definition for OpenAI function calling
+ARBITRAGE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "calculate_arbitrage",
+        "description": "Calculate the optimal cross-exchange arbitrage between Polymarket and Kalshi BTC hourly markets. Iterates all Kalshi strikes and finds the pair with the lowest total cost. Returns exact arithmetic — no rounding errors.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "poly_strike": {
+                    "type": "number",
+                    "description": "Polymarket strike price (Binance 1h candle open)"
+                },
+                "poly_up": {
+                    "type": "number",
+                    "description": "Polymarket Up (Yes) ask price"
+                },
+                "poly_down": {
+                    "type": "number",
+                    "description": "Polymarket Down (No) ask price"
+                },
+                "kalshi_strikes": {
+                    "type": "array",
+                    "description": "Array of Kalshi strike objects with strike, yes_price, no_price",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "strike": {"type": "number"},
+                            "yes_price": {"type": "number"},
+                            "no_price": {"type": "number"}
+                        }
+                    }
+                }
+            },
+            "required": ["poly_strike", "poly_up", "poly_down", "kalshi_strikes"]
         }
-
-    except Exception as e:
-        print(f"  ⚠ Parse error: {e}")
-        return {"sectors": {}, "total_markets": 0, "parse_error": str(e)}
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# AGENT 3: STRATEGIST
-# Analyzes each sector using the academic paper
-# Gives thoughts on which sectors make sense to bet in
-# ══════════════════════════════════════════════════════════════════════════════
-
-STRATEGIST_SYSTEM = """
-You are a prediction markets strategist with deep knowledge of academic research.
-
-You have classified market data grouped by sector. Using the academic context provided
-(Wolfers & Zitzewitz 2006), analyze each sector and give your thoughts on where it
-makes sense to bet right now.
-
-Key academic principles to apply:
-- Prediction markets are weak-form efficient — simple strategies based on public info yield no profit
-- The law of one price roughly holds — cross-platform spreads are fleeting
-- Favorite-longshot bias: avoid contracts priced below 0.10 or above 0.90
-- Markets with more liquidity aggregate information better
-- Political markets: Polymarket users vs Kalshi users have different information sets
-- Sports markets: respond fastest to new information (injuries, lineups)
-
-For each sector that has markets, give:
-1. Your assessment of current conditions
-2. Whether the spread between platforms suggests opportunity
-3. A clear recommendation
-
-Return ONLY valid JSON:
-{
-  "sector_analysis": {
-    "sports": {
-      "verdict": "HIGH OPPORTUNITY|MODERATE|LOW OPPORTUNITY|AVOID",
-      "num_kalshi": 0,
-      "num_poly": 0,
-      "num_pairs": 0,
-      "avg_spread_pct": "X.X%",
-      "summary": "2-3 sentences on this sector right now",
-      "recommendation": "Specific actionable thought",
-      "academic_note": "One sentence citing the paper",
-      "key_risk": "Biggest risk in this sector"
     }
-  },
-  "best_sector": "sports|politics|finance|crypto|world|other",
-  "best_sector_reason": "Why this is the best opportunity right now in 1-2 sentences",
-  "overall_verdict": "ACTIVE|QUIET|MIXED",
-  "session_narrative": "3-4 sentence overall summary grounded in Wolfers & Zitzewitz"
 }
 
-Only include sectors that actually have markets. Skip empty sectors.
-"""
 
-def run_strategist(classifier_output: dict) -> dict:
-    """
-    Agent 3: Analyzes each sector using the academic paper.
-    """
-    print("\n[Agent 3: Strategist] Analyzing sectors with academic grounding...")
+def _execute_calculate_arbitrage(poly_strike: float, poly_up: float, poly_down: float, kalshi_strikes: list) -> dict:
+    """Deterministic arbitrage calculator — invoked as a tool by the LLM."""
+    best = None
+    for km in kalshi_strikes:
+        k_strike = km.get("strike", 0)
+        k_yes = km.get("yes_price", 0)
+        k_no = km.get("no_price", 0)
 
-    rag_context = retrieve(
-        "prediction market efficiency spread exploitable favorite longshot bias platform liquidity",
-        top_n=5
-    )
+        if k_strike == 0:
+            continue
 
-    sectors = classifier_output.get("sectors", {})
+        if poly_strike > k_strike:
+            cost = poly_down + k_yes
+            poly_side, kalshi_side = "down", "yes"
+            poly_price, kalshi_price = poly_down, k_yes
+        elif poly_strike < k_strike:
+            cost = poly_up + k_no
+            poly_side, kalshi_side = "up", "no"
+            poly_price, kalshi_price = poly_up, k_no
+        else:
+            cost1, cost2 = poly_down + k_yes, poly_up + k_no
+            if cost1 <= cost2:
+                cost = cost1
+                poly_side, kalshi_side = "down", "yes"
+                poly_price, kalshi_price = poly_down, k_yes
+            else:
+                cost = cost2
+                poly_side, kalshi_side = "up", "no"
+                poly_price, kalshi_price = poly_up, k_no
 
-    # Build sector summary for the LLM
-    sector_summary = {}
-    for sec, data in sectors.items():
-        pairs = data.get("matched_pairs", [])
-        avg_spread = (
-            sum(p.get("spread", 0) for p in pairs) / len(pairs)
-            if pairs else 0
-        )
-        sector_summary[sec] = {
-            "num_kalshi":    len(data.get("kalshi", [])),
-            "num_poly":      len(data.get("polymarket", [])),
-            "num_pairs":     len(pairs),
-            "avg_spread":    f"{avg_spread*100:.1f}%",
-            "sample_pairs":  pairs[:3],  # send top 3 pairs as examples
-            "sample_kalshi": [m["title"] for m in data.get("kalshi", [])[:3]],
-            "sample_poly":   [m["title"] for m in data.get("polymarket", [])[:3]],
-        }
+        if best is None or cost < best["total_cost"]:
+            best = {
+                "kalshi_strike": k_strike,
+                "total_cost": round(cost, 4),
+                "guaranteed_profit": round(1.0 - cost, 4),
+                "arbitrage_found": cost < 1.0,
+                "poly_side": poly_side,
+                "poly_price": round(poly_price, 4),
+                "kalshi_side": kalshi_side,
+                "kalshi_price": round(kalshi_price, 4),
+                "kalshi_yes": k_yes,
+                "kalshi_no": k_no,
+            }
 
-    user_msg = f"""
-Academic context (Wolfers & Zitzewitz 2006):
-{rag_context}
+    if not best:
+        return {"error": "No valid strikes", "arbitrage_found": False}
+    return best
 
-Current market data by sector:
-{json.dumps(sector_summary, indent=2)}
 
-Analyze each sector and give your strategic thoughts on where to bet.
-"""
-    raw = _llm(STRATEGIST_SYSTEM, user_msg, temperature=0.4)
+def run_quant_strategist(collector_output: dict) -> dict:
+    """Agent 2: LLM with tool calling for exact arbitrage math."""
+    print("\n[Agent 2: Quant Strategist] LLM with calculate_arbitrage tool...")
 
+    if collector_output.get("fetch_error"):
+        print("  ⚠ Skipping Agent 2 due to Agent 1 fetch error.")
+        return {"matched": False, "error": collector_output["fetch_error"]}
+
+    poly = collector_output.get("polymarket")
+    kalshi = collector_output.get("kalshi")
+
+    if not poly or not kalshi:
+        return {"matched": False, "error": "Missing platform data"}
+
+    poly_strike = poly.get("strike")
+    poly_up = poly.get("up_price", 0)
+    poly_down = poly.get("down_price", 0)
+    kalshi_markets = kalshi.get("markets", [])
+
+    if not poly_strike or not kalshi_markets:
+        return {"matched": False, "error": "Missing strike or Kalshi markets"}
+
+    # Pre-filter to 15 closest strikes to keep context manageable
+    kalshi_filtered = sorted(kalshi_markets, key=lambda m: abs(m.get("strike", 0) - poly_strike))[:15]
+
+    t0 = time.time()
+
+    user_msg = f"""Here is the live market data. Use the calculate_arbitrage tool to find the optimal pair.
+
+Polymarket: strike=${poly_strike:,.2f}, up=${poly_up:.3f}, down=${poly_down:.3f}
+Kalshi strikes (15 closest): {json.dumps([{"strike": m["strike"], "yes_price": m.get("yes_price",0), "no_price": m.get("no_price",0)} for m in kalshi_filtered])}
+
+Call the tool now, then analyze the result."""
+
+    import openai
     try:
-        result = _parse_json(raw)
-        best = result.get("best_sector", "—")
-        print(f"  ✅ Best sector: {best} | Verdict: {result.get('overall_verdict','—')}")
-        return result
+        # Step 1: LLM decides to call the tool
+        messages = [
+            {"role": "system", "content": QUANT_SYSTEM},
+            {"role": "user", "content": user_msg}
+        ]
+
+        for attempt in range(3):
+            try:
+                resp = client.chat.completions.create(
+                    model=MODEL,
+                    messages=messages,
+                    tools=[ARBITRAGE_TOOL],
+                    tool_choice={"type": "function", "function": {"name": "calculate_arbitrage"}},
+                    temperature=0.1
+                )
+                break
+            except openai.RateLimitError:
+                if attempt < 2:
+                    print(f"  [LLM] Rate limit hit. Retrying in 22s... (Attempt {attempt+1}/3)")
+                    time.sleep(22)
+                else:
+                    raise
+
+        msg = resp.choices[0].message
+
+        # Step 2: Execute the tool with the LLM's arguments
+        tool_result = None
+        if msg.tool_calls:
+            tc = msg.tool_calls[0]
+            args = json.loads(tc.function.arguments)
+            print(f"  🔧 Tool called: calculate_arbitrage(poly_strike={args.get('poly_strike')}, ...)")
+
+            tool_result = _execute_calculate_arbitrage(
+                poly_strike=args.get("poly_strike", poly_strike),
+                poly_up=args.get("poly_up", poly_up),
+                poly_down=args.get("poly_down", poly_down),
+                kalshi_strikes=args.get("kalshi_strikes", kalshi_filtered)
+            )
+            print(f"  ✅ Tool result: cost=${tool_result.get('total_cost', '?')}, arb={tool_result.get('arbitrage_found', '?')}")
+
+            # Step 3: Feed tool result back to LLM for reasoning
+            messages.append(msg.model_dump())
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": json.dumps(tool_result)
+            })
+
+            for attempt in range(3):
+                try:
+                    resp2 = client.chat.completions.create(
+                        model=MODEL,
+                        messages=messages,
+                        temperature=0.3,
+                        response_format={"type": "json_object"}
+                    )
+                    break
+                except openai.RateLimitError:
+                    if attempt < 2:
+                        print(f"  [LLM] Rate limit hit. Retrying in 22s... (Attempt {attempt+1}/3)")
+                        time.sleep(22)
+                    else:
+                        raise
+
+            raw = resp2.choices[0].message.content.strip()
+            parsed = _parse_json(raw)
+        else:
+            # LLM didn't call tool — fallback to direct calculation
+            print("  ⚠ LLM skipped tool call. Running calculate_arbitrage directly.")
+            tool_result = _execute_calculate_arbitrage(poly_strike, poly_up, poly_down, kalshi_filtered)
+            parsed = {}
+
+        t1 = time.time()
+
+        # ─── Enforce correct values from the tool (override any LLM hallucination) ───
+        if tool_result and "error" not in tool_result:
+            parsed["matched"] = True
+            parsed["strike"] = tool_result["kalshi_strike"]
+            parsed["polymarket_prices"] = {"up": poly_up, "down": poly_down}
+            parsed["kalshi_prices"] = {"yes": tool_result["kalshi_yes"], "no": tool_result["kalshi_no"]}
+            parsed["arbitrage_found"] = tool_result["arbitrage_found"]
+            parsed["buy_legs"] = [
+                {"platform": "polymarket", "side": tool_result["poly_side"], "price": tool_result["poly_price"]},
+                {"platform": "kalshi", "side": tool_result["kalshi_side"], "price": tool_result["kalshi_price"]}
+            ]
+            parsed["total_cost"] = tool_result["total_cost"]
+            parsed["guaranteed_profit"] = tool_result["guaranteed_profit"]
+        else:
+            parsed.setdefault("matched", False)
+
+        parsed.setdefault("reasoning", "")
+        parsed["qc"] = {"time_sec": round(t1 - t0, 2), "success": True}
+        print(f"  ✅ Best pair: Kalshi ${parsed.get('strike', 0):,.0f} | Cost: ${parsed.get('total_cost', 0):.4f} | Arb: {parsed.get('arbitrage_found')}")
+        return parsed
+
     except Exception as e:
-        print(f"  ⚠ Parse error: {e}")
-        return {
-            "sector_analysis": {},
-            "best_sector": "—",
-            "overall_verdict": "UNKNOWN",
-            "session_narrative": raw,
-            "parse_error": str(e),
-        }
+        print(f"  ⚠ Agent 2 Error: {e}")
+        # Ultimate fallback: run tool directly without LLM
+        tool_result = _execute_calculate_arbitrage(poly_strike, poly_up, poly_down, kalshi_filtered)
+        t1 = time.time()
+        if tool_result and "error" not in tool_result:
+            return {
+                "matched": True,
+                "strike": tool_result["kalshi_strike"],
+                "polymarket_prices": {"up": poly_up, "down": poly_down},
+                "kalshi_prices": {"yes": tool_result["kalshi_yes"], "no": tool_result["kalshi_no"]},
+                "arbitrage_found": tool_result["arbitrage_found"],
+                "buy_legs": [
+                    {"platform": "polymarket", "side": tool_result["poly_side"], "price": tool_result["poly_price"]},
+                    {"platform": "kalshi", "side": tool_result["kalshi_side"], "price": tool_result["kalshi_price"]}
+                ],
+                "total_cost": tool_result["total_cost"],
+                "guaranteed_profit": tool_result["guaranteed_profit"],
+                "reasoning": f"Direct calculation (LLM error: {e})",
+                "qc": {"time_sec": round(t1 - t0, 2), "success": True}
+            }
+        return {"matched": False, "error": str(e), "qc": {"time_sec": round(time.time() - t0, 2), "success": False}}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AGENT 3b: SECTOR DRILLDOWN
-# User picks a sector → deep analysis of best specific trade in that sector
+# AGENT 3: RISK MANAGER
+# Uses RAG to evaluate the Quant's proposed trade against academic principles
 # ══════════════════════════════════════════════════════════════════════════════
 
-DRILLDOWN_SYSTEM = """
-You are a prediction markets trade analyst.
+RISK_SYSTEM = """
+You are a Risk Management Agent for a prediction market trading firm.
+You evaluate proposed arbitrage strategies against academic research.
 
-A user has selected a specific sector to investigate. You have all the markets
-in that sector across Kalshi and Polymarket.
+You will receive:
+1. The Quant Strategist's proposed trade (JSON) — the numbers (total_cost, guaranteed_profit) have been computed by a deterministic calculation tool and are VERIFIED CORRECT. Do NOT question the arithmetic.
+2. Academic Context retrieved via RAG (Wolfers & Zitzewitz 2006).
 
-Your job: find the BEST specific trade in this sector and explain exactly what to do.
+Your job:
+- If `arbitrage_found` is true AND `guaranteed_profit` > 0.02 (2 cents): Recommend EXECUTE, but note fee drag (~3-7% on Kalshi) and latency risk.
+- If `arbitrage_found` is true BUT `guaranteed_profit` <= 0.02: Recommend MONITOR — the edge is real but too thin after fees.
+- If `arbitrage_found` is false: Recommend MONITOR or REJECT depending on how far from breakeven.
+- Apply the favorite-longshot bias from academic context only to extreme-probability contracts (< 0.10 or > 0.90).
 
-Use these principles from Wolfers & Zitzewitz (2006):
-- Spreads > 8-12% are needed to break even after fees (Kalshi 7%, Polymarket 2% taker)
-- Favorite-longshot bias: contracts < 0.10 or > 0.90 are systematically mispriced
-- Look for persistent spreads — brief spikes are likely API latency, not real opportunity
-- Platform user bases differ: crypto-native Polymarket traders vs US retail Kalshi users
-
-Return ONLY valid JSON:
+Return ONLY valid JSON in this exact format:
 {
-  "top_trade": {
-    "kalshi_title": "...",
-    "polymarket_title": "...",
-    "kalshi_mid": 0.0,
-    "polymarket_mid": 0.0,
-    "spread_pct": "X.X%",
-    "fee_exploitable": true,
-    "platform_to_buy": "kalshi|polymarket",
-    "action": "Exact instruction e.g. BUY YES on Kalshi at 0.54, SHORT YES on Polymarket at 0.63",
-    "rationale": "2-3 sentences explaining why this trade makes sense right now",
-    "key_risk": "Single biggest risk"
-  },
-  "runner_up": {
-    "kalshi_title": "...",
-    "spread_pct": "...",
-    "action": "..."
-  },
-  "sector_conditions": "1-2 sentences on the overall state of this sector",
-  "academic_warning": "Any relevant warning from Wolfers & Zitzewitz that applies here"
+  "final_decision": "EXECUTE|REJECT|MONITOR",
+  "risk_assessment": "1-2 sentences explaining your decision based on the RAG context and fee analysis.",
+  "academic_citation": "Quote or reference the specific academic principle driving your decision.",
+  "ui_summary": "A clean, concise 2-sentence summary of the current market state for the user dashboard."
 }
-
-If there are no matched pairs, recommend the most interesting single-platform market instead.
 """
 
-def run_drilldown(sector: str, sector_data: dict) -> dict:
-    """Agent 3b: deep dive into user-selected sector."""
-    print(f"\n[Agent 3b: Drilldown] Deep analysis of {sector} sector...")
-
+def run_risk_manager(quant_output: dict) -> dict:
+    print("\n[Agent 3: Risk Manager] Retrieving academic context via RAG...")
+    t0 = time.time()
+    
+    # RAG Execution
     rag_context = retrieve(
-        f"spread exploitable fees favorite longshot {sector} liquidity platform",
-        top_n=3, category=sector
+        "prediction market arbitrage fees spread exploitable favorite longshot bias latency",
+        top_n=3
     )
-
-    pairs   = sector_data.get("matched_pairs", [])
-    k_mkts  = sector_data.get("kalshi", [])
-    p_mkts  = sector_data.get("polymarket", [])
-
+    
     user_msg = f"""
-Academic context:
+Academic Context (RAG):
 {rag_context}
 
-Sector: {sector.upper()}
+Proposed Strategy from Quant Agent:
+{json.dumps(quant_output, indent=2)}
 
-Matched cross-platform pairs ({len(pairs)} total):
-{json.dumps(pairs, indent=2)}
-
-Kalshi-only markets in this sector:
-{json.dumps([m["title"] for m in k_mkts], indent=2)}
-
-Polymarket-only markets in this sector:
-{json.dumps([m["title"] for m in p_mkts], indent=2)}
-
-Find the best specific trade in {sector} right now.
+Evaluate the strategy and return your final decision.
 """
-    raw = _llm(DRILLDOWN_SYSTEM, user_msg, temperature=0.3)
-
     try:
-        return _parse_json(raw)
+        raw = _llm(RISK_SYSTEM, user_msg, temperature=0.3, json_mode=True)
+        t1 = time.time()
+        parsed = _parse_json(raw)
+        parsed["qc"] = {"time_sec": round(t1 - t0, 2), "success": True}
+        print(f"  ✅ Risk verdict: {parsed.get('final_decision')}")
+        return parsed
     except Exception as e:
-        return {"parse_error": str(e), "raw": raw}
+        print(f"  ⚠ Agent 3 Error: {e}")
+        return {"final_decision": "ERROR", "error": str(e), "qc": {"time_sec": round(time.time() - t0, 2), "success": False}}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN ORCHESTRATOR
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_pipeline(kalshi_markets: list, poly_markets: list, progress_callback=None) -> dict:
-    """Runs Agent 1 → Agent 2 → Agent 3 sequentially."""
-    results = {"collector": None, "classifier": None, "strategist": None, "error": None}
+def run_pipeline(progress_callback=None) -> dict:
+    """Runs Agent 1 → Agent 2 → Agent 3 sequentially for BTC Hourly Arbitrage."""
+    results = {"collector": None, "quant": None, "risk": None, "error": None}
     total = 3
 
     try:
-        if progress_callback: progress_callback(1, total, "🔍 Agent 1: Collecting top markets by volume...")
-        results["collector"] = run_collector(kalshi_markets, poly_markets)
+        t_start = time.time()
+        if progress_callback: progress_callback(1, total, "🔍 Agent 1: Collecting exact BTC hourly markets...")
+        results["collector"] = run_collector()
 
-        if progress_callback: progress_callback(2, total, "📊 Agent 2: Classifying markets into sectors...")
-        results["classifier"] = run_classifier(results["collector"])
+        if progress_callback: progress_callback(2, total, "📊 Agent 2: Quant analyzing strikes and calculating spreads...")
+        results["quant"] = run_quant_strategist(results["collector"])
 
-        if progress_callback: progress_callback(3, total, "⚖️ Agent 3: Analyzing sectors with academic paper...")
-        results["strategist"] = run_strategist(results["classifier"])
+        if progress_callback: progress_callback(3, total, "⚖️ Agent 3: Risk Manager reviewing against academic RAG context...")
+        results["risk"] = run_risk_manager(results["quant"])
+        
+        t_end = time.time()
+        
+        # Aggregate QC
+        c_qc = results["collector"].get("qc", {})
+        q_qc = results["quant"].get("qc", {})
+        r_qc = results["risk"].get("qc", {})
+        
+        results["qc_metrics"] = {
+            "total_time_sec": round(t_end - t_start, 2),
+            "collector_success": c_qc.get("success", False),
+            "quant_success": q_qc.get("success", False),
+            "risk_success": r_qc.get("success", False)
+        }
 
     except Exception as e:
         results["error"] = str(e)
         print(f"[Pipeline Error] {e}")
 
     return results
+
+if __name__ == "__main__":
+    print("Testing BTC Pipeline...")
+    res = run_pipeline()
+    print("\nFINAL PIPELINE RESULT:")
+    print(json.dumps(res, indent=2))
