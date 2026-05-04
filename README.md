@@ -27,7 +27,7 @@ flowchart TB
     subgraph Agent1["🔍 Agent 1: Data Fetcher"]
         POLY_API["Polymarket CLOB API"]
         KALSHI_API["Kalshi Trade API"]
-        BINANCE["Binance Klines API"]
+        BINANCE["Binance API\n(strike price only)"]
     end
 
     subgraph Agent2["📊 Agent 2: Quant Strategist"]
@@ -43,9 +43,9 @@ flowchart TB
     end
 
     BTN --> Agent1
-    POLY_API --> |"Up/Down + Strike"| A1_UI
+    POLY_API --> |"Up/Down Prices"| A1_UI
     KALSHI_API --> |"Yes/No × 188 Strikes"| A1_UI
-    BINANCE --> |"1h Candle Open"| A1_UI
+    BINANCE --> |"1h Candle Open = Strike"| A1_UI
     
     Agent1 --> |"Market Data JSON"| Agent2
     LLM2 --> |"Tool Call"| TOOL
@@ -67,10 +67,11 @@ flowchart TB
 ## How It Works
 
 ### Agent 1: Data Fetcher
-Fetches live market data from three sources:
+Fetches live market data from two prediction market platforms:
 - **Polymarket** — "Bitcoin Up or Down" hourly event (names by candle **open** hour)
 - **Kalshi** — "Bitcoin price at..." hourly event (names by candle **close** hour)
-- **Binance** — 1-hour BTCUSDT kline open price (used as Polymarket's strike)
+
+Polymarket's strike price is derived from the Binance BTCUSDT 1-hour candle open price (fetched automatically behind the scenes).
 
 > ℹ️ Both platforms resolve the **same hourly candle**. Polymarket names by the open hour (e.g., "11PM"), Kalshi by the close hour (e.g., "12AM"). The data fetcher accounts for this with a +1h offset on the Kalshi ticker.
 
@@ -149,13 +150,7 @@ pip install -r requirements.txt
 Create a `.env` file:
 
 ```env
-# OpenAI (recommended — supports tool calling)
 OPENAI_API_KEY=sk-proj-...
-
-# OR Ollama (local, no tool calling — uses direct calculation fallback)
-# OLLAMA_API_KEY=your_key
-# OLLAMA_BASE_URL=http://localhost:11434/v1
-# OLLAMA_MODEL=llama3
 ```
 
 ### Run
