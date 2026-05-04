@@ -8,7 +8,7 @@ Scans Polymarket and Kalshi in real-time, identifies risk-free arbitrage opportu
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python)](https://python.org)
 [![OpenAI](https://img.shields.io/badge/OpenAI-GPT--4o--mini-412991?logo=openai)](https://openai.com)
 
-![BTC Arbitrage Scanner Dashboard](screenshot.png)
+![BTC Arbitrage Scanner Dashboard](screenshot-arb.png)
 
 ---
 
