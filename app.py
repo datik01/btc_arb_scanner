@@ -25,6 +25,202 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# PREMIUM CSS INJECTION
+# ═══════════════════════════════════════════════════════════════════════════════
+st.markdown("""
+<style>
+/* ── Google Font ── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* ── Root overrides ── */
+html, body, [class*="st-"] {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+}
+code, pre, [data-testid="stCode"] * {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace !important;
+}
+
+/* ── Hide Streamlit branding ── */
+#MainMenu, footer, header {visibility: hidden;}
+
+/* ── Animated gradient keyframes ── */
+@keyframes gradientShift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+}
+@keyframes pulseGlow {
+    0%, 100% { box-shadow: 0 0 15px rgba(0, 212, 170, 0.15); }
+    50% { box-shadow: 0 0 30px rgba(0, 212, 170, 0.3); }
+}
+@keyframes borderGlow {
+    0%, 100% { border-color: rgba(0, 212, 170, 0.2); }
+    50% { border-color: rgba(0, 212, 170, 0.5); }
+}
+@keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Glassmorphism panels (all bordered containers) ── */
+[data-testid="stVerticalBlock"] > div > div[data-testid="stVerticalBlockBorderWrapper"] {
+    background: linear-gradient(135deg, rgba(22, 27, 39, 0.85), rgba(10, 12, 16, 0.95)) !important;
+    backdrop-filter: blur(20px) !important;
+    -webkit-backdrop-filter: blur(20px) !important;
+    border: 1px solid rgba(0, 212, 170, 0.15) !important;
+    border-radius: 16px !important;
+    animation: fadeInUp 0.5s ease-out, pulseGlow 4s ease-in-out infinite;
+}
+
+/* ── Column panels ── */
+[data-testid="stColumn"] {
+    animation: fadeInUp 0.6s ease-out;
+}
+[data-testid="stColumn"]:nth-child(2) { animation-delay: 0.1s; }
+[data-testid="stColumn"]:nth-child(3) { animation-delay: 0.2s; }
+
+/* ── Primary button — gradient with glow ── */
+[data-testid="stButton"] > button[kind="primary"] {
+    background: linear-gradient(135deg, #00d4aa 0%, #00b894 30%, #0984e3 100%) !important;
+    background-size: 200% 200% !important;
+    animation: gradientShift 3s ease infinite !important;
+    border: none !important;
+    border-radius: 12px !important;
+    font-weight: 700 !important;
+    font-size: 1.05rem !important;
+    letter-spacing: 0.5px !important;
+    padding: 0.75rem 2rem !important;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    box-shadow: 0 4px 20px rgba(0, 212, 170, 0.25) !important;
+}
+[data-testid="stButton"] > button[kind="primary"]:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: 0 8px 30px rgba(0, 212, 170, 0.4) !important;
+}
+
+/* ── Subheaders — gradient text ── */
+[data-testid="stSubheader"] {
+    background: linear-gradient(90deg, #00d4aa, #0984e3, #a29bfe) !important;
+    -webkit-background-clip: text !important;
+    -webkit-text-fill-color: transparent !important;
+    background-clip: text !important;
+    font-weight: 700 !important;
+    font-size: 1.3rem !important;
+    letter-spacing: -0.3px !important;
+    padding-bottom: 8px !important;
+    border-bottom: 2px solid rgba(0, 212, 170, 0.2) !important;
+    margin-bottom: 16px !important;
+}
+
+/* ── Metrics — sleek cards ── */
+[data-testid="stMetric"] {
+    background: linear-gradient(135deg, rgba(0, 212, 170, 0.06), rgba(9, 132, 227, 0.06)) !important;
+    border: 1px solid rgba(0, 212, 170, 0.15) !important;
+    border-radius: 12px !important;
+    padding: 16px 20px !important;
+    animation: borderGlow 3s ease-in-out infinite;
+}
+[data-testid="stMetricLabel"] {
+    font-size: 0.75rem !important;
+    font-weight: 600 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.8px !important;
+    color: rgba(0, 212, 170, 0.7) !important;
+}
+[data-testid="stMetricValue"] {
+    font-weight: 800 !important;
+    font-size: 1.4rem !important;
+    color: #e0e0e0 !important;
+}
+
+/* ── Expander — glassmorphism ── */
+[data-testid="stExpander"] {
+    background: rgba(22, 27, 39, 0.5) !important;
+    border: 1px solid rgba(0, 212, 170, 0.1) !important;
+    border-radius: 12px !important;
+    overflow: hidden;
+}
+[data-testid="stExpander"] summary {
+    font-weight: 600 !important;
+    letter-spacing: 0.3px !important;
+}
+
+/* ── Code blocks — dark glass ── */
+[data-testid="stCode"] {
+    background: rgba(10, 12, 16, 0.8) !important;
+    border: 1px solid rgba(0, 212, 170, 0.12) !important;
+    border-radius: 10px !important;
+    padding: 16px !important;
+}
+
+/* ── Dividers ── */
+[data-testid="stDivider"] {
+    border-color: rgba(0, 212, 170, 0.12) !important;
+}
+
+/* ── Info/Success/Warning/Error boxes ── */
+[data-testid="stAlert"] {
+    border-radius: 10px !important;
+    border-left-width: 4px !important;
+    backdrop-filter: blur(10px) !important;
+}
+
+/* ── Caption text refinement ── */
+[data-testid="stCaptionContainer"] {
+    opacity: 0.75;
+    font-size: 0.82rem !important;
+    line-height: 1.5 !important;
+}
+
+/* ── Progress bar ── */
+[data-testid="stProgressBar"] > div > div {
+    background: linear-gradient(90deg, #00d4aa, #0984e3) !important;
+    border-radius: 8px !important;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #0a0c10; }
+::-webkit-scrollbar-thumb { background: rgba(0, 212, 170, 0.3); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0, 212, 170, 0.5); }
+</style>
+""", unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HEADER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+st.markdown("""
+<div style="
+    text-align: center;
+    padding: 2rem 1rem 1.5rem 1rem;
+    background: linear-gradient(135deg, rgba(0,212,170,0.08), rgba(9,132,227,0.08), rgba(162,155,254,0.05));
+    border-radius: 16px;
+    border: 1px solid rgba(0,212,170,0.12);
+    margin-bottom: 1rem;
+">
+    <h1 style="
+        font-family: 'Inter', sans-serif;
+        font-weight: 800;
+        font-size: 2.6rem;
+        background: linear-gradient(135deg, #00d4aa, #0984e3, #a29bfe);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        margin: 0 0 0.5rem 0;
+        letter-spacing: -1px;
+    ">₿TC Arbitrage Scanner</h1>
+    <p style="
+        color: rgba(224,224,224,0.6);
+        font-size: 0.9rem;
+        font-weight: 400;
+        margin: 0;
+        letter-spacing: 1.5px;
+    ">LIVE CROSS-EXCHANGE INTELLIGENCE · KALSHI × POLYMARKET · 3-AGENT AI PIPELINE · RAG: WOLFERS & ZITZEWITZ (2006)</p>
+</div>
+""", unsafe_allow_html=True)
+
 # ── Session State ─────────────────────────────────────────────────────────────
 
 if "pipeline" not in st.session_state:
@@ -42,14 +238,6 @@ VERDICT_MAP = {
     "REJECT":  "red",
     "ERROR":   "normal",
 }
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# HEADER
-# ═══════════════════════════════════════════════════════════════════════════════
-
-with st.container(border=True):
-    st.title("₿TC Arbitrage Scanner")
-    st.caption("Live cross-exchange intelligence · Kalshi × Polymarket · 3-Agent AI Pipeline · RAG: Wolfers & Zitzewitz (2006)")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RUN BUTTON
@@ -89,7 +277,7 @@ if run_btn:
 # ── Stop here if no pipeline yet ──────────────────────────────────────────────
 
 if not st.session_state.pipeline:
-    st.info("Click **Run BTC Hourly Arbitrage Scan** to fetch live markets and calculate edge.", icon="ℹ️")
+    st.info("Click **▶ Run BTC Arbitrage Scan** to fetch live markets and calculate edge.", icon="ℹ️")
     st.stop()
 
 pipeline = st.session_state.pipeline
